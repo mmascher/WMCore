@@ -53,8 +53,9 @@ class AnalyticsPoller(BaseWorkerThread):
         self.wmagentDB = WMAgentDBData(self.summaryLevel, myThread.dbi, myThread.logger)
         # set the connection for local couchDB call
         self.localSummaryCouchDB = WMStatsWriter(self.config.AnalyticsDataCollector.localWMStatsURL)
-        logging.info("Setting the replication to central monitor ...")
-        self.localSummaryCouchDB.replicate(self.config.AnalyticsDataCollector.centralWMStatsURL)
+        if hasattr(self.config.AnalyticsDataCollector, 'centralWMStatsURL'):
+            logging.info("Setting the replication to central monitor ...")
+            self.localSummaryCouchDB.replicate(self.config.AnalyticsDataCollector.centralWMStatsURL)
 
     def algorithm(self, parameters):
         """
