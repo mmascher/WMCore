@@ -640,7 +640,7 @@ class SetupCMSSWPset(ScriptInterface):
             pickle.dump(self.process, pHandle)
             handle.write("import FWCore.ParameterSet.Config as cms\n")
             handle.write("import pickle\n")
-            handle.write("handle = open('%s', 'rb')\n" % configPickle)
+            handle.write("handle = open('%s/%s', 'rb')\n" % (workingDir, configPickle)) #TODO: figure out the right location
             handle.write("process = pickle.load(handle)\n")
             handle.write("handle.close()\n")
         except Exception, ex:
@@ -652,3 +652,76 @@ class SetupCMSSWPset(ScriptInterface):
             pHandle.close()
 
         return 0
+
+
+from WMCore.Configuration import Configuration, ConfigSection
+from WMCore.DataStructs.Mask import Mask
+
+class jobDict(dict):
+    def getBaggage(self):
+        return ConfigSection()
+
+class StepConfiguration(Configuration):
+    def __init__(self, lfnBase, outputMods):
+        Configuration.__init__(self)
+        for out in outputMods:
+            setattr(self, out, ConfigSection("output"))
+            getattr(self, out)._internal_name = "output"
+            getattr(self,out).lfnBase = lfnBase #'/store/temp/user/mmascher/RelValProdTTbar/mc/v6'
+        StepConfiguration.outputMods = outputMods
+
+    def getTypeHelper(self):
+        return self
+    def listOutputModules(self):
+        om = StepConfiguration.outputMods
+        #like return {"output1" : self.output1, "output2" : self.output2 ...} for each output1, output2 ... in self.outputMods
+        return dict(zip(om, map( lambda out: getattr(self, out), om)))
+    def getOutputModule(self, name):
+        return getattr(self, name)
+
+class SetupCMSSWPsetCore(SetupCMSSWPset):
+    """
+    location:       the working directory. PSet.py must be located there. The output PSet.pkl is also put there.
+                    N.B.: this parameter must end with WMTaskSpace.cmsRun.PSet
+    inputFiles:     the input files of the job. This must be a list of dictionaries whose keys are "lfn" and "parents".
+                    For example a valid input for this parameter is [{"lfn": , "parents" : }, {"lfn": , "parents" : }]
+                    If the "lfn"s start with MCFakeFile then mask.FirstLumi is used to tweak process.source.firstLuminosityBlock
+                    If the len of the list is >1 then the "lfn" values are put in a list and used to tweak "process.source.fileNames"
+                        In that case the parents values are merged to a single list and used to tweak process.source.secondaryFileNames
+                    If no input files are used then the mask.FirstEvent parameter is used to tweak process.source.firstEvent (error otherwise)
+    mask:           the parameter is used to twek some parameters of the process. In particular:
+                        process.maxEvents.input:
+                        process.source.skipEvent:
+                        process.source.firstRun:
+                        process.source.lumisToProcess:
+    agentNumber:    together with lfnBase is used to create the path of the output lfn. This output lfn is the used to tweak process.OUTPUT.logicalFileName
+                    where OUTPUT is the name of the output module
+    lfnBase:        see above
+    outputMods:     a list of names of the output modules, e.g. ['OUTPUT']. Used to tweak process.OUTPUT.filename with OUTPUT.root
+    """
+    def __init__(self, location, inputFiles, lumiMask, agentNumber, lfnBase, outputMods):
+        ScriptInterface.__init__(self)
+        self.stepSpace = ConfigSection()
+        self.stepSpace.location = location
+        self.step = StepConfiguration(lfnBase, outputMods)
+        self.step.section_("data")
+        self.step.data._internal_name = "cmsRun"
+        self.step.data.section_("application")
+        self.step.data.application.section_("configuration")
+        self.step.data.application.section_("command")
+        self.step.data.application.command.configuration = "PSet.py"
+#        self.step.data.application.configuration.pickledarguments.globalTag/globalTagTransaction
+        self.step.data.section_("input")
+        self.job = jobDict()
+        self.job["input_files"] = []
+        for inputF in inputFiles:
+            self.job["input_files"].append({"lfn" : inputF, "parents" : ""})
+
+        self.job['mask'] = Mask()
+        self.job['mask']["FirstEvent"] = 0
+        self.job['mask']["LastEvent"] = -1
+        self.job['mask']["FirstRun"] =None
+        self.job['mask']["runAndLumis"] = lumiMask
+
+        self.job['agentNumber'] = agentNumber
+        self.job['counter'] = 0

@@ -38,6 +38,140 @@ def analysisFileLFN(fileName, lfnBase, job):
 
     return lfn
 
+
+def executeCMSSWStack(taskName, stepName, scramSetup, scramCommand, scramProject, scramArch, cmsswVersion, jobReportXML, cmsswCommand, cmsswConfig, cmsswArguments, workDir, userTarball, userFiles, preScripts, scramPreScripts, stdOutFile, stdInFile, jobId, jobRetryCount, invokeCmd = None):
+    """
+    This method load the environment, executes the setup (scram related commands), and then it executes cmsRun.
+    """
+    logging.info("Executing CMSSW step")
+    #
+    # set any global environment variables
+    #
+    try:
+        os.environ['FRONTIER_ID'] = 'wmagent_%i_%s_%s_%s' % (jobId, taskName, jobRetryCount,
+            cmsswVersion)
+    except Exception as ex:
+        logging.error('Have critical error in setting FRONTIER_ID: %s' % str(ex))
+        logging.error('Continuing, as this is not a critical function yet.')
+    #
+    # scram bootstrap
+    #
+    scram = Scram(command=scramCommand,
+        version=cmsswVersion,
+        initialise=scramSetup,
+        directory=workDir,
+        architecture=scramArch)
+    logging.info("Runing SCRAM")
+    try:
+        projectOutcome = scram.project()
+    except Exception as ex:
+        msg = "Exception raised while running scram.\n"
+        msg += str(ex)
+        logging.exception(ex)
+        logging.critical("Error running SCRAM")
+        logging.critical(msg)
+        raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
+    if projectOutcome > 0:
+        msg = scram.diagnostic()
+        #self.report.addError(60513, "ScramSetupFailure", msg)
+        logging.critical("Error running SCRAM")
+        logging.critical(msg)
+        raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
+    runtimeOutcome = scram.runtime()
+    if runtimeOutcome > 0:
+        msg = scram.diagnostic() #self.report.addError(60513, "ScramSetupFailure", msg)
+        logging.critical("Error running SCRAM")
+        logging.critical(msg)
+        raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
+    #
+    # pre scripts
+    #
+    logging.info("Running PRE scripts")
+    stepModule = "WMTaskSpace.%s" % stepName
+    for script in preScripts: # TODO: Exception handling and error handling & logging
+        scriptProcess = subprocess.Popen(["/bin/bash"], shell=True, cwd=workDir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE)
+        # BADPYTHON
+        scriptProcess.stdin.write("export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/openssl/0.9.7m/lib:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/bz2lib/1.0.5/lib\n")
+        invokeCommand = invokeCmd or "%s -m WMCore.WMRuntime.ScriptInvoke %s" % (sys.executable,
+            stepModule)
+        invokeCommand += " %s \n" % script
+        logging.info("    Invoking command: %s" % invokeCommand)
+        scriptProcess.stdin.write(invokeCommand)
+        stdout, stderr = scriptProcess.communicate()
+        retCode = scriptProcess.returncode
+        if retCode > 0:
+            msg = "Error running command\n%s\n" % invokeCommand
+            msg += "%s\n %s\n %s\n" % (retCode, stdout, stderr)
+            logging.critical("Error running command")
+            logging.critical(msg)
+            raise WMExecutionFailure(60514, "PreScriptFailure", msg)
+
+    #
+    # pre scripts with scram
+    #
+    logging.info("RUNNING SCRAM SCRIPTS")
+    for script in scramPreScripts: #invoke scripts with scram()
+        invokeCommand = invokeCmd or "%s -m WMCore.WMRuntime.ScriptInvoke %s" % (sys.executable,
+            stepModule)
+        invokeCommand += " %s \n" % script
+        logging.info("    Invoking command: %s" % invokeCommand)
+        retCode = scram(invokeCommand)
+        if retCode > 0:
+            msg = "Error running command\n%s\n" % invokeCommand
+            msg += "%s\n " % retCode
+            msg += scram.diagnostic()
+            logging.critical(msg)
+            raise WMExecutionFailure(60515, "PreScriptScramFailure", msg)
+
+    configPath = "%s/%s-main.sh" % (workDir, stepName)
+    handle = open(configPath, 'w')
+    handle.write(configBlob)
+    handle.close()
+    # spawn this new process
+    # the script looks for:
+    # <SCRAM_COMMAND> <SCRAM_PROJECT> <CMSSW_VERSION> <JOB_REPORT> <EXECUTABLE>
+    #    <CONFIG>
+    # open the output files
+    stdoutHandle = open(stdOutFile, 'w')
+    stderrHandle = open(stdInFile, 'w')
+    applicationStart = time.time()
+    args = ['/bin/bash', configPath, scramSetup, scramArch,
+        scramCommand,
+        scramProject,
+        cmsswVersion,
+        jobReportXML,
+        cmsswCommand,
+        cmsswConfig,
+        userTarball,
+        userFiles,
+        cmsswArguments]
+    logging.info("Executing CMSSW. args: %s" % args)
+    spawnedChild = subprocess.Popen(args, 0, None, None, stdoutHandle,
+        stderrHandle)
+    #(stdoutData, stderrData) = spawnedChild.communicate()
+    # the above line replaces the bottom block. I'm unsure of why
+    # nobody used communicate(), but I'm leaving this just in case
+    # AMM Jul 4th, /2010
+    # loop and collect the data
+    while True:
+        rdready, wrready, errready = select.select([stdoutHandle.fileno(),
+                stderrHandle.fileno()], [], [])
+        # see if the process is still running
+        spawnedChild.poll()
+        if (spawnedChild.returncode != None):
+            break
+        # give the process some time to fill a buffer
+        select.select([], [], [], .1)
+
+    spawnedChild.wait()
+    stdoutHandle.close()
+    stderrHandle.close()
+
+    return spawnedChild.returncode, args, scram, applicationStart
+
 class CMSSW(Executor):
     """
     _CMSWW_
@@ -80,13 +214,14 @@ class CMSSW(Executor):
         self.step.runtime.scramPreScripts.append("SetupCMSSWPset")
         return None
 
+
+
     def execute(self, emulator = None):
         """
         _execute_
 
 
         """
-        stepModule = "WMTaskSpace.%s" % self.stepName
         if (emulator != None):
             return emulator.emulate( self.step, self.job )
 
@@ -105,181 +240,44 @@ class CMSSW(Executor):
         cmsswCommand   = self.step.application.command.executable
         cmsswConfig    = self.step.application.command.configuration
         cmsswArguments = self.step.application.command.arguments
+        workDir        = self.step.builder.workingDir
         userTarball    = ','.join(self.step.user.inputSandboxes)
         userFiles      = ','.join(self.step.user.userFiles)
-        logging.info('User files are %s' % userFiles)
-        logging.info('User sandboxes are %s' % userTarball)
-
-
-
+        preScripts     = self.step.runtime.preScripts
+        scramPreScripts = self.step.runtime.scramPreScripts
+        stdOutFile = self.step.output.stdout
+        stdInFile = self.step.output.stderr
+        taskName = self.task.name()
         multicoreSettings = self.step.application.multicore
         multicoreEnabled  = multicoreSettings.enabled
+
+        jobInputFiles = self.job['input_files']
+        jobId = self.job['id']
+        jobRetryCount = self.job['retry_count']
+
+        logging.info('User files are %s' % userFiles)
+        logging.info('User sandboxes are %s' % userTarball)
         if multicoreEnabled:
             numberOfCores = multicoreSettings.numberOfCores
             logging.info("***Multicore CMSSW Enabled***")
             logging.info("Multicore configured for %s cores" % numberOfCores)
             #create input file list used to generate manifest
-            filelist = open(multicoreSettings.inputfilelist,'w')
-            for inputFile in self.job['input_files']:
+            filelist = open(multicoreSettings.inputfilelist, 'w')
+            for inputFile in jobInputFiles:
                 filelist.write("%s\n" % inputFile['lfn'])
+
             filelist.close()
 
+        returnCode, args, scram, applicationStart = executeCMSSWStack(taskName, self.stepName, scramSetup, scramCommand, scramProject, scramArch, cmsswVersion, jobReportXML, cmsswCommand, cmsswConfig, cmsswArguments, workDir, userTarball, userFiles, preScripts, scramPreScripts, stdOutFile, stdInFile, jobId, jobRetryCount)
 
-        logging.info("Executing CMSSW step")
-
-        #
-        # set any global environment variables
-        #
-        try:
-            os.environ['FRONTIER_ID'] = 'wmagent_%i_%s_%s_%s' % (self.job['id'], self.task.name(),
-                                                                 self.job['retry_count'],
-                                                                 cmsswVersion)
-        except Exception, ex:
-            logging.error('Have critical error in setting FRONTIER_ID: %s' % str(ex))
-            logging.error('Continuing, as this is not a critical function yet.')
-            pass
-
-        #
-        # scram bootstrap
-        #
-        scram = Scram(
-            command = scramCommand,
-            version = cmsswVersion,
-            initialise = self.step.application.setup.softwareEnvironment,
-            directory = self.step.builder.workingDir,
-            architecture = scramArch,
-            )
-
-        logging.info("Runing SCRAM")
-        try:
-            projectOutcome = scram.project()
-        except Exception, ex:
-            msg =  "Exception raised while running scram.\n"
-            msg += str(ex)
-            logging.critical("Error running SCRAM")
-            logging.critical(msg)
-            raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
-
-        if projectOutcome > 0:
-            msg = scram.diagnostic()
-            #self.report.addError(60513, "ScramSetupFailure", msg)
-            logging.critical("Error running SCRAM")
-            logging.critical(msg)
-            raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
-        runtimeOutcome = scram.runtime()
-        if runtimeOutcome > 0:
-            msg = scram.diagnostic()
-            #self.report.addError(60513, "ScramSetupFailure", msg)
-            logging.critical("Error running SCRAM")
-            logging.critical(msg)
-            raise WMExecutionFailure(50513, "ScramSetupFailure", msg)
-
-
-        #
-        # pre scripts
-        #
-        logging.info("Running PRE scripts")
-        for script in self.step.runtime.preScripts:
-            # TODO: Exception handling and error handling & logging
-            scriptProcess = subprocess.Popen(
-                ["/bin/bash"], shell=True, cwd=self.step.builder.workingDir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                )
-            # BADPYTHON
-            scriptProcess.stdin.write("export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/openssl/0.9.7m/lib:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/bz2lib/1.0.5/lib\n")
-            invokeCommand = "%s -m WMCore.WMRuntime.ScriptInvoke %s %s \n" % (
-                sys.executable,
-                stepModule,
-                script)
-            logging.info("    Invoking command: %s" % invokeCommand)
-            scriptProcess.stdin.write(invokeCommand)
-            stdout, stderr = scriptProcess.communicate()
-            retCode = scriptProcess.returncode
-            if retCode > 0:
-                msg = "Error running command\n%s\n" % invokeCommand
-                msg += "%s\n %s\n %s\n" % (retCode, stdout, stderr)
-                logging.critical("Error running command")
-                logging.critical(msg)
-                raise WMExecutionFailure(60514, "PreScriptFailure", msg)
-
-
-        #
-        # pre scripts with scram
-        #
-        logging.info("RUNNING SCRAM SCRIPTS")
-        for script in self.step.runtime.scramPreScripts:
-            #invoke scripts with scram()
-            invokeCommand = "%s -m WMCore.WMRuntime.ScriptInvoke %s %s \n" % (
-                sys.executable,
-                stepModule,
-                script)
-            logging.info("    Invoking command: %s" % invokeCommand)
-            retCode = scram(invokeCommand)
-            if retCode > 0:
-                msg = "Error running command\n%s\n" % invokeCommand
-                msg += "%s\n " % retCode
-                msg += scram.diagnostic()
-                logging.critical(msg)
-                raise WMExecutionFailure(60515, "PreScriptScramFailure", msg)
-
-
-        configPath = "%s/%s-main.sh" % (self.step.builder.workingDir,
-                                        self.stepName)
-        handle = open(configPath, 'w')
-        handle.write(configBlob)
-        handle.close()
-        # spawn this new process
-        # the script looks for:
-        # <SCRAM_COMMAND> <SCRAM_PROJECT> <CMSSW_VERSION> <JOB_REPORT> <EXECUTABLE>
-        #    <CONFIG>
-        # open the output files
-        stdoutHandle = open( self.step.output.stdout , 'w')
-        stderrHandle = open( self.step.output.stderr , 'w')
-        applicationStart = time.time()
-        args = ['/bin/bash', configPath, scramSetup,
-                                         scramArch,
-                                         scramCommand,
-                                         scramProject,
-                                         cmsswVersion,
-                                         jobReportXML,
-                                         cmsswCommand,
-                                         cmsswConfig,
-                                         userTarball,
-                                         userFiles,
-                                         cmsswArguments]
-        logging.info("Executing CMSSW. args: %s" % args)
-        spawnedChild = subprocess.Popen( args, 0, None, None, stdoutHandle,
-                                             stderrHandle )
-        #(stdoutData, stderrData) = spawnedChild.communicate()
-        # the above line replaces the bottom block. I'm unsure of why
-        # nobody used communicate(), but I'm leaving this just in case
-        # AMM Jul 4th, /2010
-        # loop and collect the data
-        while True:
-            (rdready, wrready, errready) = select.select(
-                [stdoutHandle.fileno(),
-                 stderrHandle.fileno()],[],[])
-            # see if the process is still running
-            spawnedChild.poll()
-            if (spawnedChild.returncode != None):
-                break
-            # give the process some time to fill a buffer
-            select.select([], [], [], .1)
-
-        spawnedChild.wait()
-        stdoutHandle.close()
-        stderrHandle.close()
-
-        self.step.execution.exitStatus = spawnedChild.returncode
+        self.step.execution.exitStatus = returnCode
         argsDump = { 'arguments': args}
 
-        if spawnedChild.returncode != 0:
+        if returnCode != 0:
             msg = "Error running cmsRun\n%s\n" % argsDump
-            msg += "Return code: %s\n" % spawnedChild.returncode
+            msg += "Return code: %s\n" % returnCode
             logging.critical(msg)
-            raise WMExecutionFailure(spawnedChild.returncode,
+            raise WMExecutionFailure(returnCode,
                                      "CmsRunFailure", msg)
 
         try:
@@ -295,6 +293,7 @@ class CMSSW(Executor):
         if multicoreEnabled:
             self.multicoreMerge(scram,applicationStart)
 
+        #TODO Maske: All this part heavilly use WMSpec
         stepHelper = WMStepHelper(self.step)
         typeHelper = stepHelper.getTypeHelper()
 
@@ -331,14 +330,14 @@ class CMSSW(Executor):
         # Add stageout LFN to existing TFileService files
         reportAnalysisFiles = self.report.getAnalysisFilesFromStep(self.stepName)
         for reportAnalysisFile in reportAnalysisFiles:
-            newLFN = analysisFileLFN(reportAnalysisFile.fileName, self.step.user.lfnBase, self.job)
+            newLFN = analysisFileLFN(reportAnalysisFile.fileName, self.step.user.lfnBase, self.job) #TODO Maske job
             addAttributesToFile(reportAnalysisFile, pfn=reportAnalysisFile.fileName, lfn=newLFN, validate=False)
 
         # Add analysis file entries for additional files listed in workflow
         for fileName in stepHelper.listAnalysisFiles():
             analysisFile = stepHelper.getAnalysisFile(fileName)
             if os.path.isfile(analysisFile.fileName):
-                newLFN = analysisFileLFN(analysisFile.fileName, analysisFile.lfnBase, self.job)
+                newLFN = analysisFileLFN(analysisFile.fileName, analysisFile.lfnBase, self.job) #TODO Maske job
                 self.report.addAnalysisFile(analysisFile.fileName, lfn=newLFN, Source='UserDefined',
                                             pfn=os.path.join(os.getcwd(), analysisFile.fileName), validate=False)
 
@@ -434,7 +433,7 @@ class CMSSW(Executor):
                 msg = "Error running merge job:\n%s\n" % b.merge_command
                 msg += "Merge Config:\n%s\n" % b.mergeConfig()
                 msg += "%s\n " % retCode
-                msg += scram.diagnostic()
+                msg += scramRef.diagnostic()
                 logging.critical(msg)
                 raise WMExecutionFailure(60666, "MulticoreMergeFailure", msg)
             #  //
