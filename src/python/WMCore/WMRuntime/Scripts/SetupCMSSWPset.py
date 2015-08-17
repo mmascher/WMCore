@@ -598,6 +598,11 @@ class SetupCMSSWPset(ScriptInterface):
                 print traceback.format_exc()
                 raise ex
 
+            self.process.add_(
+                cms.Service("CondorStatusService"
+                            )
+                )
+
             if funcName == "repack":
                 self.handleRepackSettings()
 
