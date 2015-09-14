@@ -326,5 +326,6 @@ class EventAwareLumiBased(JobFactory):
             if stopTask:
                 break
 
+        self.lumiChecker.closeJob(self.currentJob)
         self.lumiChecker.fixInputFiles()
         return
