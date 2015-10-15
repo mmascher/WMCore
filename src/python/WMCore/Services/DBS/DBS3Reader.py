@@ -577,9 +577,9 @@ class DBS3Reader:
                 msg += "%s\n" % str(ex)
                 raise Exception(msg)
 
-            if not blockInfo or len(blockInfo) != len(blockNames): #if we couldnt get data location from PhEDEx, try to look into origin site location from dbs
-                dbsOnly = True
-                blockNames = set(blockNames) - set(blockInfo) #get the blocks we did not find information in phedex
+#            if not blockInfo or len(blockInfo) != len(blockNames): #if we couldnt get data location from PhEDEx, try to look into origin site location from dbs
+                #dbsOnly = True
+#                blockNames = set(blockNames) - set(blockInfo) #get the blocks we did not find information in phedex
 
         if dbsOnly:
             try:
